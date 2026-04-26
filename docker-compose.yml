@@ -3,7 +3,6 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: fracture-api
     ports:
       - "8000:8000"
     networks:
@@ -13,7 +12,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: fracture-frontend
     ports:
       - "8501:8501"
     environment:
