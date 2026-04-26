@@ -1,0 +1,22 @@
+# VCS
+.git
+
+# Python environments and caches
+.venv
+__pycache__/
+*.py[cod]
+
+# Large local data and experiment artifacts
+data/
+mlruns/
+runs/
+mlflow.db
+*.pt
+
+# DVC local cache and temp state
+.dvc/cache/
+.dvc/tmp/
+
+# Editor/OS noise
+.vscode/
+.DS_Store

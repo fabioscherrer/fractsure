@@ -8,11 +8,11 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir uv
 
-COPY pyproject.toml README.md /app/
-RUN uv sync --no-install-project
+COPY requirements.txt /tmp/requirements.txt
+RUN uv pip install --system -r /tmp/requirements.txt
 
-COPY api /app/api
+COPY . /app/api
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

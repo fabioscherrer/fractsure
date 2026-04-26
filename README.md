@@ -71,6 +71,24 @@ docker compose up --build
 
 The frontend uses `API_URL=http://api:8000` inside the Docker network.
 
+Quick API smoke test from the host after `docker compose up --build`:
+
+```bash
+curl http://localhost:8000/health
+```
+
+```bash
+TEST_IMAGE="$(find data/raw/hbfmid/test/images -type f | head -n 1)"
+curl -X POST http://localhost:8000/predict -F "file=@${TEST_IMAGE}"
+```
+
+Expected behavior:
+
+- `health` returns `{"status":"ok"}`.
+- `predict` returns JSON with `model_loaded` and `boxes`.
+- If no ONNX model is present in `api/model/`, the API still returns a placeholder box (`model_loaded: false`).
+- If you export an ONNX file after containers were built, rebuild the API image so the container can see it (`docker compose up --build api`).
+
 ## Training Notes
 
 - Training configuration lives in `training/config.yaml`.

@@ -8,11 +8,11 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir uv
 
-COPY pyproject.toml README.md /app/
-RUN uv sync --no-install-project
+COPY requirements.txt /tmp/requirements.txt
+RUN uv pip install --system -r /tmp/requirements.txt
 
-COPY frontend /app/frontend
+COPY . /app/frontend
 
 EXPOSE 8501
 
-CMD ["uv", "run", "streamlit", "run", "frontend/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["streamlit", "run", "frontend/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
