@@ -78,8 +78,13 @@ curl http://localhost:8000/health
 ```
 
 ```bash
+# bash/zsh
 TEST_IMAGE="$(find data/raw/hbfmid/test/images -type f | head -n 1)"
 curl -X POST http://localhost:8000/predict -F "file=@${TEST_IMAGE}"
+
+# fish
+set TEST_IMAGE (find data/raw/hbfmid/test/images -type f | head -n 1)
+curl -X POST http://localhost:8000/predict -F "file=@$TEST_IMAGE"
 ```
 
 Expected behavior:
