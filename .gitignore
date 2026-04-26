@@ -1,0 +1,40 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.venv
+
+# Environment and local config
+.env
+.env.*
+
+# ML/data artifacts
+data/**
+!data/
+!data/README.md
+!data/**/
+!data/**/*.dvc
+!data/**/.gitignore
+# api/model/*
+!api/model/.gitkeep
+mlruns/
+mlflow.db
+mlartifacts/
+runs/
+*.pt
+*.db
+
+# DVC cache and local temp state
+.dvc/cache/
+
+# OS/editor noise
+.DS_Store
+.vscode/
