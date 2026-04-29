@@ -1,0 +1,6 @@
+outs:
+- md5: 882df8f387045f2e7dd374663afad446.dir
+  size: 41341042
+  nfiles: 3080
+  hash: md5
+  path: hbfmid
