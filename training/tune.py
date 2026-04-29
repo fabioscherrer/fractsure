@@ -81,25 +81,6 @@ def run_tuning():
     )
 
     # 6. Beste Parameter laden und an config.yaml schreiben
-    with open(config_path, "r") as f:
-        current_config = yaml.safe_load(f)
-
-    best_params = results.best_params
-    
-    # WICHTIG: Namen angleichen, falls nötig
-    # Ray Tune nutzt 'lr0', dein train.py nutzt 'learning_rate'
-    if "lr0" in best_params:
-        best_params["learning_rate"] = best_params["lr0"]
-
-    # Update und Speichern
-    current_config.update(best_params)
-    # Wir setzen den Run-Name für das finale Training schon mal fest
-    current_config["run_name"] = "final_model_after_tuning"
-
-    with open(config_path, "w") as f:
-        yaml.dump(current_config, f, default_flow_style=False)
-
-    # 6. Beste Parameter laden und an config.yaml schreiben
     if results.errors:
         print("Tuning wurde mit Fehlern beendet oder abgebrochen.")
         return
