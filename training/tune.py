@@ -99,6 +99,31 @@ def run_tuning():
     with open(config_path, "w") as f:
         yaml.dump(current_config, f, default_flow_style=False)
 
+    # 6. Beste Parameter laden und an config.yaml schreiben
+    if results.errors:
+        print("Tuning wurde mit Fehlern beendet oder abgebrochen.")
+        return
+
+    # Prüfen, ob mindestens ein Trial erfolgreich war
+    best_result = results.get_best_result()
+    if best_result:
+        best_params = best_result.config
+        print(f"Beste Parameter gefunden: {best_params}")
+
+        with open(config_path, "r") as f:
+            current_config = yaml.safe_load(f)
+
+        # Update der Config
+        if "lr0" in best_params:
+            best_params["learning_rate"] = best_params["lr0"]
+            
+        current_config.update(best_params)
+        current_config["run_name"] = "final_model_after_tuning"
+
+        with open(config_path, "w") as f:
+            yaml.dump(current_config, f, default_flow_style=False)
+    else:
+        print("Keine erfolgreichen Trials gefunden. Config wurde nicht aktualisiert.")
 
 if __name__ == "__main__":
     run_tuning()
