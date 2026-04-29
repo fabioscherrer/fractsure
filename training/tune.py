@@ -1,9 +1,43 @@
 import os # schon im uv?
+import pandas as pd
 from pathlib import Path
 import yaml
 import mlflow # schon im uv?
 from ultralytics import YOLO
 from ray import tune
+
+def check_dataset_integrity(base_path: Path):
+    splits = ['train', 'valid', 'test']
+    report_data = []
+    
+    print(f"\n Integritätscheck: {base_path}")
+    
+    for split in splits:
+        img_dir = base_path / split / "images"
+        lbl_dir = base_path / split / "labels"
+        
+        if not img_dir.exists():
+            continue
+        
+        images = {f.stem for f in img_dir.glob("*") if f.suffix.lower() in ['.jpg', '.jpeg', '.png']}
+        labels = {f.stem for f in lbl_dir.glob("*") if f.suffix.lower() == '.txt'}
+        
+        missing = images - labels
+        report_data.append({
+            "Split": split, "Bilder": len(images), "Labels": len(labels), "Fehlend": len(missing)
+        })
+        
+        if missing:
+            print(f"Warnung: {split} hat {len(missing)} Bilder ohne Labels!")
+
+    df = pd.DataFrame(report_data)
+    print(df.to_string(index=False))
+    print("-" * 30)
+    
+    # Optional: Abbrechen, wenn zu viele Labels fehlen
+    # if df["Fehlend"].sum() > 50:
+    #    raise ValueError("Zu viele fehlende Labels! Tuning abgebrochen.")
+
 
 def load_config(config_path: Path) -> dict:
     with config_path.open("r", encoding="utf-8") as file:
@@ -14,23 +48,27 @@ def run_tuning():
     config_path = Path(__file__).with_name("config.yaml")
     cfg = load_config(config_path)
 
-    # 2. MLflow Setup
+    # 2. Daten prüfen
+    data_root = Path("/home/Zenbook-S14-Fedora/code/fractsure/data/raw/hbfmid")
+    check_dataset_integrity(data_root)
+
+    # 3. MLflow Setup
     # Hier legst du fest, WO gespeichert wird und WIE das Experiment heißt
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment("Fracture_Detection_Tuning") # Dein gewählter Name
 
-    # 3. Modell laden
+    # 4. Modell laden
     model = YOLO(cfg["model"])
 
     print(f"Starte Ray Tune Suche. Tracking an: {tracking_uri}")
     
-    # 4. Tuning starten
+    # 5. Tuning starten
     # Ultralytics nutzt MLflow automatisch, wenn es initialisiert wurde
     results = model.tune(
         data=cfg["data_config"],
-        epochs=15,
-        iterations=20,
+        epochs=1, # 15
+        iterations=1, # 20
         use_ray=True,
         gpu_per_trial=0,   # falls kein gpu vorhanden 1 zu 0 ändern
         space={
@@ -42,7 +80,7 @@ def run_tuning():
         }
     )
 
-    # 5. Beste Parameter laden und an config.yaml schreiben
+    # 6. Beste Parameter laden und an config.yaml schreiben
     with open(config_path, "r") as f:
         current_config = yaml.safe_load(f)
 
