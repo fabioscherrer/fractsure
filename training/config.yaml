@@ -5,9 +5,9 @@ model: yolov8n.pt
 # Point this to your YOLO dataset YAML file.
 data_config: data/raw/hbfmid/data.yaml
 
-epochs: 30
+epochs: 30 # eher auf 100 machen
 imgsz: 640
-batch: 16
+batch: 16 # wird durch tuning.py geliefert
 device: 0
 
 # These values are examples and can be tuned in tune.py

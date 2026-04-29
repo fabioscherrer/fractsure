@@ -42,19 +42,23 @@ def run_tuning():
         }
     )
 
-    # 5. Beste Parameter loggen & speichern
-    print("Beste Parameter:")
-    print(results.best_params)
+    # 5. Beste Parameter direkt in die config.yaml schreiben
+    print("Beste Parameter gefunden, aktualisiere config.yaml...")
     
-    # "Parent Run" in MLflow machen, um das Gesamtergebnis zu sichern
-    with mlflow.start_run(run_name="tuning_summary"):
-        mlflow.log_params(results.best_params)
-        mlflow.log_artifact(str(config_path)) # Speichert die genutzte Config
+    # Die aktuelle Config laden
+    with open(config_path, "r") as f:
+        current_config = yaml.safe_load(f)
 
-    # Beste Parameter in eine neue YAML schreiben für train.py
-    best_params_path = Path(__file__).parent / "best_hyperparameters.yaml"
-    with open(best_params_path, "w") as f:
-        yaml.dump(results.best_params, f)
+    # Die Parameter in der Config mit den besten Ergebnissen aktualisieren
+    # .update() ersetzt vorhandene Werte durch die neuen aus results.best_params
+    current_config.update(results.best_params)
+
+    # Die aktualisierte Config zurückschreiben
+    with open(config_path, "w") as f:
+        yaml.dump(current_config, f, default_flow_style=False)
+        
+    print(f"config.yaml wurde erfolgreich mit {len(results.best_params)} Parametern aktualisiert.")   
+
 
 if __name__ == "__main__":
     run_tuning()
