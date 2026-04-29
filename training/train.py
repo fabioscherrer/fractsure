@@ -48,6 +48,10 @@ def train() -> None:
     config_path = Path(__file__).with_name("config.yaml")
     cfg = load_config(config_path)
 
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(cfg.get("experiment_name", "fracture-yolo"))
+
     disable_ultralytics_mlflow()
 
     mlflow.set_experiment(cfg.get("experiment_name", "fracture-yolo"))
