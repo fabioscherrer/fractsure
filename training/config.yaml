@@ -1,15 +1,19 @@
 experiment_name: fracture-yolo
-run_name: baseline-yolov8n
+run_name: final_model_after_tuning
 model: yolov8n.pt
 
 # Point this to your YOLO dataset YAML file.
 data_config: data/raw/hbfmid/data.yaml
 
-epochs: 30
+# GCP defaults. For local CPU smoke-test use epochs: 2, batch: 4, device: cpu.
+epochs: 100
 imgsz: 640
 batch: 16
 device: 0
 
-# These values are examples and can be tuned in tune.py
-learning_rate: 0.01
+# Best hyperparameters from tune.py (tune-11, mAP50@2ep=0.177)
+learning_rate: 0.0011767611606348
 weight_decay: 0.0005
+degrees: 4.366644398139377
+scale: 0.5516240351071917
+mosaic: 0.26969201326149184

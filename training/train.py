@@ -1,5 +1,6 @@
-"""YOLO training entrypoint with baseline MLflow integration."""
+"""YOLO training entrypoint with MLflow integration."""
 
+import os
 from pathlib import Path
 
 import mlflow
@@ -48,41 +49,57 @@ def train() -> None:
     config_path = Path(__file__).with_name("config.yaml")
     cfg = load_config(config_path)
 
-    disable_ultralytics_mlflow()
-
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(cfg.get("experiment_name", "fracture-yolo"))
 
+    disable_ultralytics_mlflow()
+
+    # Resolve data path relative to project root so YOLO finds it regardless of cwd.
+    project_root = Path(__file__).resolve().parents[1]
+    data_path = Path(cfg["data_config"])
+    if not data_path.is_absolute():
+        data_path = (project_root / data_path).resolve()
+
     with mlflow.start_run(run_name=cfg.get("run_name", "baseline")):
-        mlflow.log_params(
-            {
-                "model": cfg["model"],
-                "epochs": cfg["epochs"],
-                "imgsz": cfg["imgsz"],
-                "batch": cfg["batch"],
-                "device": cfg["device"],
-                "learning_rate": cfg["learning_rate"],
-                "weight_decay": cfg["weight_decay"],
-                "data_config": cfg["data_config"],
-            }
-        )
+        log_params = {
+            "model": cfg["model"],
+            "epochs": cfg["epochs"],
+            "imgsz": cfg["imgsz"],
+            "batch": cfg["batch"],
+            "device": cfg["device"],
+            "learning_rate": cfg["learning_rate"],
+            "weight_decay": cfg["weight_decay"],
+            "data_config": cfg["data_config"],
+        }
+        for aug_key in ("degrees", "scale", "mosaic"):
+            if aug_key in cfg:
+                log_params[aug_key] = cfg[aug_key]
+        mlflow.log_params(log_params)
 
         model = YOLO(cfg["model"])
 
-        try:
-            results = model.train(
-                data=cfg["data_config"],
-                epochs=cfg["epochs"],
-                imgsz=cfg["imgsz"],
-                batch=cfg["batch"],
-                device=cfg["device"],
-                lr0=cfg["learning_rate"],
-                weight_decay=cfg["weight_decay"],
-            )
+        train_kwargs = {
+            "data": str(data_path),
+            "epochs": cfg["epochs"],
+            "imgsz": cfg["imgsz"],
+            "batch": cfg["batch"],
+            "device": cfg["device"],
+            "lr0": cfg["learning_rate"],
+            "weight_decay": cfg["weight_decay"],
+        }
+        for aug_key in ("degrees", "scale", "mosaic"):
+            if aug_key in cfg:
+                train_kwargs[aug_key] = cfg[aug_key]
 
-            # YOLO returns metrics in `results_dict`; keys vary by task/model.
+        try:
+            results = model.train(**train_kwargs)
+
+            # MLflow rejects parens in metric names → strip them.
             for key, value in getattr(results, "results_dict", {}).items():
                 if isinstance(value, (int, float)):
-                    mlflow.log_metric(key, float(value))
+                    safe_key = key.replace("(", "").replace(")", "")
+                    mlflow.log_metric(safe_key, float(value))
 
             mlflow.log_param("train_status", "completed")
             print("Training complete and metrics logged to MLflow.")
