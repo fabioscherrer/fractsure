@@ -96,15 +96,15 @@ def run_tuning():
         "degrees": tune.uniform(0.0, 30.0),
         "scale": tune.uniform(0.4, 0.6),
         "mosaic": tune.uniform(0.0, 1.0),
-        "batch": tune.choice([4, 8]),  # GPU: [16, 32, 64]
+        "batch": tune.choice([16, 32, 64]),  # CPU smoke-test: [4, 8]
     }
 
     results = model.tune(
         data=str(data_path),
-        epochs=2,        # SMOKE TEST: set to 15 for GCP
-        iterations=2,    # SMOKE TEST: set to 20 for GCP
+        epochs=15,         # CPU smoke-test: 2
+        iterations=20,     # CPU smoke-test: 2
         use_ray=True,
-        gpu_per_trial=0,  # set to 1 on GCP
+        gpu_per_trial=1,   # CPU smoke-test: 0
         space=search_space,
     )
 
