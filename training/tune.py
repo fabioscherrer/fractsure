@@ -6,6 +6,7 @@ import yaml
 import mlflow
 from ultralytics import YOLO
 from ray import tune
+import pandas as pd
 
 
 def load_config(config_path: Path) -> dict:
@@ -14,10 +15,9 @@ def load_config(config_path: Path) -> dict:
 
 
 def check_dataset_integrity(base_path: Path) -> None:
-    """Prüft ob alle Bilder ein Label haben. Bricht ab bei zu vielen fehlenden."""
     splits = ["train", "valid", "test"]
+    report_data = []
     print(f"\n[data] Integritätscheck: {base_path}")
-    total_missing = 0
 
     for split in splits:
         img_dir = base_path / split / "images"
@@ -28,21 +28,23 @@ def check_dataset_integrity(base_path: Path) -> None:
         images = {f.stem for f in img_dir.glob("*") if f.suffix.lower() in {".jpg", ".jpeg", ".png"}}
         labels = {f.stem for f in lbl_dir.glob("*.txt")} if lbl_dir.exists() else set()
         missing = images - labels
-        total_missing += len(missing)
 
-        status = "✅" if not missing else "⚠️"
-        print(f"  {status} {split:<6} Bilder: {len(images):>4}  Labels: {len(labels):>4}  Fehlend: {len(missing):>3}")
+        report_data.append({
+            "Split": split,
+            "Bilder": len(images),
+            "Labels": len(labels),
+            "Fehlend": len(missing),
+        })
 
         if missing:
-            for name in sorted(missing)[:5]:  # max 5 anzeigen
-                print(f"       – {name}")
-            if len(missing) > 5:
-                print(f"       … und {len(missing) - 5} weitere")
+            print(f"  ⚠️  {split}: fehlende Labels für: {sorted(missing)[:5]}")
 
+    df = pd.DataFrame(report_data)
+    print(df.to_string(index=False))
     print("-" * 40)
-    if total_missing > 50:
-        raise ValueError(f"[data] {total_missing} fehlende Labels — Tuning abgebrochen.")
 
+    if df["Fehlend"].sum() > 50:
+        raise ValueError(f"[data] {df['Fehlend'].sum()} fehlende Labels — Tuning abgebrochen.")
 
 def _best_params_from_ray(results, search_keys: set) -> dict | None:
     try:
