@@ -1,46 +1,10 @@
 import os
-import pandas as pd
 from pathlib import Path
+import csv
 import yaml
 import mlflow
 from ultralytics import YOLO
 from ray import tune
-
-
-def check_dataset_integrity(base_path: Path):
-    splits = ['train', 'valid', 'test']
-    report_data = []
-
-    print(f"\n Integritätscheck: {base_path}")
-
-    for split in splits:
-        img_dir = base_path / split / "images"
-        lbl_dir = base_path / split / "labels"
-
-        if not img_dir.exists():
-            continue
-
-        images = {f.stem for f in img_dir.glob("*") if f.suffix.lower() in ['.jpg', '.jpeg', '.png']}
-        labels = {f.stem for f in lbl_dir.glob("*") if f.suffix.lower() == '.txt'}
-
-        missing = images - labels
-        report_data.append({
-            "Split": split,
-            "Bilder": len(images),
-            "Labels": len(labels),
-            "Fehlend": len(missing),
-        })
-
-        if missing:
-            print(f"Warnung: {split} hat {len(missing)} Bilder ohne Labels!")
-
-    df = pd.DataFrame(report_data)
-    print(df.to_string(index=False))
-    print("-" * 30)
-
-    # Optional: Abbrechen, wenn zu viele Labels fehlen
-    # if df["Fehlend"].sum() > 50:
-    #    raise ValueError("Zu viele fehlende Labels! Tuning abgebrochen.")
 
 
 def load_config(config_path: Path) -> dict:
@@ -48,85 +12,151 @@ def load_config(config_path: Path) -> dict:
         return yaml.safe_load(file)
 
 
+def _best_params_from_ray(results, search_keys: set) -> dict | None:
+    """Try Ray's get_best_result first. Returns None if metrics are unavailable."""
+    try:
+        best = results.get_best_result(metric="metrics/mAP50(B)", mode="max")
+        cfg = best.config or {}
+        params = {k: cfg[k] for k in search_keys if k in cfg}
+        if params:
+            return params
+    except Exception as exc:
+        print(f"[tune] Ray get_best_result failed ({exc}), falling back to YOLO results.csv")
+    return None
+
+
+def _best_params_from_csv(search_keys: set) -> dict | None:
+    """
+    Fallback: read YOLO's per-trial results.csv files from runs/detect/tune*.
+    Finds the trial directory with the highest final mAP50 and reads its args.yaml
+    to recover the sampled hyperparameters.
+    """
+    detect_root = Path("runs") / "detect"
+    if not detect_root.exists():
+        return None
+
+    best_map50 = -1.0
+    best_args_yaml: Path | None = None
+
+    for trial_dir in sorted(detect_root.glob("tune*")):
+        results_csv = trial_dir / "results.csv"
+        args_yaml = trial_dir / "args.yaml"
+        if not results_csv.exists() or not args_yaml.exists():
+            continue
+        try:
+            with results_csv.open() as f:
+                rows = list(csv.DictReader(f))
+            if not rows:
+                continue
+            map50 = float(rows[-1].get("metrics/mAP50(B)", -1))
+            if map50 > best_map50:
+                best_map50 = map50
+                best_args_yaml = args_yaml
+        except Exception:
+            continue
+
+    if best_args_yaml is None:
+        return None
+
+    with best_args_yaml.open() as f:
+        args = yaml.safe_load(f)
+
+    params = {k: args[k] for k in search_keys if k in args}
+    print(f"[tune] Fallback: best trial {best_args_yaml.parent.name} mAP50={best_map50:.4f}, params={params}")
+    return params if params else None
+
+
 def run_tuning():
-    # 1. Pfade & Config laden
     config_path = Path(__file__).with_name("config.yaml")
     cfg = load_config(config_path)
 
-    # 2. Daten prüfen
-    data_root = Path("/home/Zenbook-S14-Fedora/code/fractsure/data/raw/hbfmid")
-    check_dataset_integrity(data_root)
-
-    # 3. MLflow Setup
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment("Fracture_Detection_Tuning")
+    experiment_name = "Fracture_Detection_Tuning"
 
-    # 4. Modell laden
+    # Env-Vars setzen, damit Ray-Worker und Ultralytics-MLflow-Callback sie erben
+    os.environ["ULTRALYTICS_MLFLOW"] = "True"
+    os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
+    os.environ["MLFLOW_EXPERIMENT_NAME"] = experiment_name
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment_name)
+
+    # ← hier einfügen
+    import requests
+    try:
+        r = requests.get(tracking_uri, timeout=3)
+        print(f"[mlflow] Server erreichbar: {r.status_code}")
+    except Exception as e:
+        print(f"[mlflow] SERVER NICHT ERREICHBAR: {e}")
+        raise SystemExit(1)
+
     model = YOLO(cfg["model"])
 
+    project_root = Path(__file__).resolve().parents[1]
+    data_path = Path(cfg["data_config"])
+    if not data_path.is_absolute():
+        data_path = (project_root / data_path).resolve()
+
     print(f"Starte Ray Tune Suche. Tracking an: {tracking_uri}")
+    print(f"Datensatz: {data_path}")
 
-    # 5. Tuning starten – in aktivem MLflow-Run eingebettet
-    # FIX: mlflow.start_run() öffnet den Run, damit Ultralytics automatisch loggt
+    search_space = {
+        "lr0":     tune.loguniform(1e-4, 1e-2),
+        "degrees": tune.uniform(0.0, 30.0),
+        "scale":   tune.uniform(0.4, 0.6),
+        "mosaic":  tune.uniform(0.0, 1.0),
+        "batch":   tune.choice([4, 8]),  # CPU smoke-test: [4, 8]
+    }
+
+    # FIX: mlflow.start_run() damit ein Parent-Run in MLflow sichtbar ist
     with mlflow.start_run(run_name="ray_tune_search"):
-
-        # Eltern-Run: Hyperparameter-Suchraum als Info loggen
         mlflow.log_params({
-            "model": cfg["model"],
-            "epochs_per_trial": 1,       # 15 im echten Lauf
-            "iterations": 1,             # 20 im echten Lauf
-            "optimizer": "AdamW",
-            "gpu_per_trial": 0,
+            "model":           cfg["model"],
+            "epochs_per_trial": 1,    # 15
+            "iterations":       1,    # 20
+            "optimizer":       "AdamW",
+            "data_config":     str(data_path),
         })
 
         results = model.tune(
-            data=cfg["data_config"],
-            epochs=1,           # 15
-            iterations=1,       # 20
+            data=str(data_path),
+            epochs=1,        # 15
+            iterations=1,    # 20
             use_ray=True,
-            gpu_per_trial=0,    # bei GPU → 1
-            optimizer="AdamW",  # gegen Overfitting
-            workers=4,
-            space={
-                "lr0":     tune.loguniform(1e-4, 1e-2),
-                "degrees": tune.uniform(0.0, 30.0),
-                "scale":   tune.uniform(0.4, 0.6),
-                "mosaic":  tune.uniform(0.0, 1.0),
-                "batch":   tune.choice([4, 8]),   # GPU: [16, 32, 64]
-            },
+            gpu_per_trial=0, # bei GPU → 1
+            space=search_space,
+            optimizer="AdamW",
+            workers=4,       # FIX: Komma ergänzt
         )
 
-    # 6. Beste Parameter laden und in config.yaml schreiben
-    if results.errors:
-        print("Tuning wurde mit Fehlern beendet oder abgebrochen.")
+    search_keys = set(search_space.keys())
+
+    best_params = _best_params_from_ray(results, search_keys)
+    if best_params is None:
+        best_params = _best_params_from_csv(search_keys)
+    if best_params is None:
+        print("[tune] WARNING: could not determine best params — config.yaml not updated.")
         return
 
-    best_result = results.get_best_result()
-    if best_result:
-        best_params = best_result.config
-        print(f"Beste Parameter gefunden: {best_params}")
+    # lr0 → learning_rate Alias für train.py
+    if "lr0" in best_params:
+        best_params["learning_rate"] = best_params["lr0"]
 
-        # FIX: Beide open()-Aufrufe mit encoding="utf-8" für Konsistenz
-        with open(config_path, "r", encoding="utf-8") as f:
-            current_config = yaml.safe_load(f)
+    with open(config_path, "r", encoding="utf-8") as f:
+        current_config = yaml.safe_load(f)
 
-        # lr0 → learning_rate umbenennen für Klarheit in der Config
-        if "lr0" in best_params:
-            best_params["learning_rate"] = best_params.pop("lr0")
+    current_config.update(best_params)
+    current_config["run_name"] = "final_model_after_tuning"
 
-        current_config.update(best_params)
-        current_config["run_name"] = "final_model_after_tuning"
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(current_config, f, default_flow_style=False, allow_unicode=True)
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(current_config, f, default_flow_style=False, allow_unicode=True)
+    print(f"[tune] config.yaml updated: {best_params}")
 
-        # FIX: Beste Parameter auch noch mal explizit in MLflow loggen
-        with mlflow.start_run(run_name="best_params_summary", nested=False):
-            mlflow.log_params(best_params)
-            print("Beste Parameter in MLflow geloggt.")
-    else:
-        print("Keine erfolgreichen Trials gefunden. Config wurde nicht aktualisiert.")
+    # Beste Parameter nochmal explizit in MLflow loggen
+    with mlflow.start_run(run_name="best_params_summary", nested=False):
+        mlflow.log_params(best_params)
+        print("[tune] Beste Parameter in MLflow geloggt.")
 
 
 if __name__ == "__main__":
