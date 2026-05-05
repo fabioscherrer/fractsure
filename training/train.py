@@ -99,8 +99,18 @@ def train() -> None:
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(key, float(value))
 
+            # NEU: best.pt in MLflow loggen damit export.py es findet
+            weights_dir = Path(results.save_dir) / "weights"
+            best_pt = weights_dir / "best.pt"
+            if best_pt.exists():
+                mlflow.log_artifact(str(best_pt), artifact_path="weights")
+                print(f"[mlflow] best.pt geloggt: {best_pt}")
+            else:
+                print("[mlflow] WARNUNG: best.pt nicht gefunden, wurde nicht geloggt.")
+
             mlflow.log_param("train_status", "completed")
             print("Training complete and metrics logged to MLflow.")
+
         except KeyboardInterrupt:
             mlflow.log_param("train_status", "interrupted")
             mlflow.log_text("Training interrupted by user.", "train_error.txt")
