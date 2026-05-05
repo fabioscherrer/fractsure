@@ -13,6 +13,37 @@ def load_config(config_path: Path) -> dict:
         return yaml.safe_load(file)
 
 
+def check_dataset_integrity(base_path: Path) -> None:
+    """Prüft ob alle Bilder ein Label haben. Bricht ab bei zu vielen fehlenden."""
+    splits = ["train", "valid", "test"]
+    print(f"\n[data] Integritätscheck: {base_path}")
+    total_missing = 0
+
+    for split in splits:
+        img_dir = base_path / split / "images"
+        lbl_dir = base_path / split / "labels"
+        if not img_dir.exists():
+            continue
+
+        images = {f.stem for f in img_dir.glob("*") if f.suffix.lower() in {".jpg", ".jpeg", ".png"}}
+        labels = {f.stem for f in lbl_dir.glob("*.txt")} if lbl_dir.exists() else set()
+        missing = images - labels
+        total_missing += len(missing)
+
+        status = "✅" if not missing else "⚠️"
+        print(f"  {status} {split:<6} Bilder: {len(images):>4}  Labels: {len(labels):>4}  Fehlend: {len(missing):>3}")
+
+        if missing:
+            for name in sorted(missing)[:5]:  # max 5 anzeigen
+                print(f"       – {name}")
+            if len(missing) > 5:
+                print(f"       … und {len(missing) - 5} weitere")
+
+    print("-" * 40)
+    if total_missing > 50:
+        raise ValueError(f"[data] {total_missing} fehlende Labels — Tuning abgebrochen.")
+
+
 def _best_params_from_ray(results, search_keys: set) -> dict | None:
     try:
         best = results.get_best_result(metric="metrics/mAP50(B)", mode="max")
@@ -75,7 +106,6 @@ def run_tuning():
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    # Diagnose
     try:
         r = requests.get(tracking_uri, timeout=3)
         print(f"[mlflow] Server erreichbar: {r.status_code}")
@@ -83,34 +113,37 @@ def run_tuning():
         print(f"[mlflow] SERVER NICHT ERREICHBAR: {e}")
         raise SystemExit(1)
 
-    model = YOLO(cfg["model"])
-
     project_root = Path(__file__).resolve().parents[1]
     data_path = Path(cfg["data_config"])
     if not data_path.is_absolute():
         data_path = (project_root / data_path).resolve()
 
+    # Dataset-Integritätscheck
+    check_dataset_integrity(data_path.parent)
+
+    model = YOLO(cfg["model"])
+
     print(f"Starte Ray Tune Suche. Tracking an: {tracking_uri}")
     print(f"Datensatz: {data_path}")
 
     search_space = {
-        "lr0":     tune.loguniform(1e-4, 1e-2),
-        "degrees": tune.uniform(0.0, 30.0),
-        "scale":   tune.uniform(0.4, 0.6),
-        "mosaic":  tune.uniform(0.0, 1.0),
-        "batch":   tune.choice([4, 8]),        # CPU: [4, 8] — GPU: [16, 32, 64]
+        "lr0":          tune.loguniform(1e-4, 1e-2),
+        "degrees":      tune.uniform(0.0, 30.0),
+        "scale":        tune.uniform(0.4, 0.6),
+        "mosaic":       tune.uniform(0.0, 1.0),
+        "dropout":      tune.uniform(0.0, 0.3),         # Regularisierung
+        "weight_decay": tune.loguniform(1e-5, 1e-3),    # L2-Regularisierung
+        "batch":        tune.choice([4, 8]),            # GPU: [16, 32, 64]
     }
 
-    # FIX: Parent-Run ID als Env-Var setzen damit Ray-Worker-Runs als Child erscheinen
     with mlflow.start_run(run_name="ray_tune_search") as parent_run:
         mlflow.log_params({
             "model":            cfg["model"],
-            "epochs_per_trial": 1,             # 15 im echten Lauf
-            "iterations":       1,             # 20 im echten Lauf
+            "epochs_per_trial": 1,    # 15 im echten Lauf
+            "iterations":       1,    # 20 im echten Lauf
             "optimizer":        "AdamW",
             "data_config":      str(data_path),
         })
-        # Ray-Worker erbt diese ID → Ultralytics-Runs werden als Child geloggt
         os.environ["MLFLOW_PARENT_RUN_ID"] = parent_run.info.run_id
 
         results = model.tune(
@@ -122,6 +155,12 @@ def run_tuning():
             space=search_space,
             optimizer="AdamW",
             workers=4,
+            # Fix gegen Overfitting — nicht tunen, fix setzen
+            fliplr=0.5,
+            hsv_h=0.015,
+            hsv_s=0.7,
+            hsv_v=0.4,
+            patience=20,     # früh stoppen wenn keine Verbesserung
         )
 
     search_keys = set(search_space.keys())
@@ -130,10 +169,10 @@ def run_tuning():
     if best_params is None:
         best_params = _best_params_from_csv(search_keys)
     if best_params is None:
-        print("[tune] WARNING: could not determine best params — config.yaml not updated.")
+        print("[tune] WARNING: could not determine best params — config.yaml nicht aktualisiert.")
         return
 
-    # FIX: 'data' und andere Nicht-Hyperparameter rausfiltern
+    # Nicht-Hyperparameter rausfiltern
     for key in ("data", "batch"):
         best_params.pop(key, None)
 

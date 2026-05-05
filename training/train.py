@@ -54,21 +54,21 @@ def train() -> None:
 
     disable_ultralytics_mlflow()
 
-    mlflow.set_experiment(cfg.get("experiment_name", "fracture-yolo"))
-
     with mlflow.start_run(run_name=cfg.get("run_name", "baseline")):
-        mlflow.log_params(
-            {
-                "model": cfg["model"],
-                "epochs": cfg["epochs"],
-                "imgsz": cfg["imgsz"],
-                "batch": cfg["batch"],
-                "device": cfg["device"],
-                "learning_rate": cfg["learning_rate"],
-                "weight_decay": cfg["weight_decay"],
-                "data_config": cfg["data_config"],
-            }
-        )
+        mlflow.log_params({
+            "model":          cfg["model"],
+            "epochs":         cfg["epochs"],
+            "imgsz":          cfg["imgsz"],
+            "batch":          cfg["batch"],
+            "device":         cfg["device"],
+            "learning_rate":  cfg["learning_rate"],
+            "weight_decay":   cfg.get("weight_decay", 0.0005),
+            "dropout":        cfg.get("dropout", 0.0),
+            "degrees":        cfg.get("degrees", 0.0),
+            "scale":          cfg.get("scale", 0.5),
+            "mosaic":         cfg.get("mosaic", 1.0),
+            "data_config":    cfg["data_config"],
+        })
 
         model = YOLO(cfg["model"])
 
@@ -80,10 +80,21 @@ def train() -> None:
                 batch=cfg["batch"],
                 device=cfg["device"],
                 lr0=cfg["learning_rate"],
-                weight_decay=cfg["weight_decay"],
+                weight_decay=cfg.get("weight_decay", 0.0005),
+                dropout=cfg.get("dropout", 0.0),
+                # Augmentierungen aus Tuning
+                degrees=cfg.get("degrees", 0.0),
+                scale=cfg.get("scale", 0.5),
+                mosaic=cfg.get("mosaic", 1.0),
+                # Fix gegen Overfitting
+                fliplr=0.5,
+                hsv_h=0.015,
+                hsv_s=0.7,
+                hsv_v=0.4,
+                patience=20,     # früh stoppen — wichtigster Anti-Overfitting-Parameter
+                optimizer="AdamW",
             )
 
-            # YOLO returns metrics in `results_dict`; keys vary by task/model.
             for key, value in getattr(results, "results_dict", {}).items():
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(key, float(value))

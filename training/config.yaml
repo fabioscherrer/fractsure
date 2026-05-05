@@ -1,13 +1,13 @@
 experiment_name: fracture-yolo
-run_name: baseline-yolov8n
+run_name: final_model_after_tuning
 model: yolov8n.pt
 
 # Point this to your YOLO dataset YAML file.
 data_config: data/raw/hbfmid/data.yaml
 
-epochs: 1 # eher auf 100 machen
+epochs: 1 # eher auf 20 machen weil nicht so grosses dataset
 imgsz: 640
-batch: 16 # wird durch tuning.py geliefert
+batch: 8 # wird durch tuning.py geliefert
 device: cpu # 0 falls gpu
 
 # These values are examples and can be tuned in tune.py
