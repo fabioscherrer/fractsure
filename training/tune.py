@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import csv
+import requests
 import yaml
 import mlflow
 from ultralytics import YOLO
@@ -13,7 +14,6 @@ def load_config(config_path: Path) -> dict:
 
 
 def _best_params_from_ray(results, search_keys: set) -> dict | None:
-    """Try Ray's get_best_result first. Returns None if metrics are unavailable."""
     try:
         best = results.get_best_result(metric="metrics/mAP50(B)", mode="max")
         cfg = best.config or {}
@@ -26,11 +26,6 @@ def _best_params_from_ray(results, search_keys: set) -> dict | None:
 
 
 def _best_params_from_csv(search_keys: set) -> dict | None:
-    """
-    Fallback: read YOLO's per-trial results.csv files from runs/detect/tune*.
-    Finds the trial directory with the highest final mAP50 and reads its args.yaml
-    to recover the sampled hyperparameters.
-    """
     detect_root = Path("runs") / "detect"
     if not detect_root.exists():
         return None
@@ -73,7 +68,6 @@ def run_tuning():
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
     experiment_name = "Fracture_Detection_Tuning"
 
-    # Env-Vars setzen, damit Ray-Worker und Ultralytics-MLflow-Callback sie erben
     os.environ["ULTRALYTICS_MLFLOW"] = "True"
     os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
     os.environ["MLFLOW_EXPERIMENT_NAME"] = experiment_name
@@ -81,8 +75,7 @@ def run_tuning():
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    # ← hier einfügen
-    import requests
+    # Diagnose
     try:
         r = requests.get(tracking_uri, timeout=3)
         print(f"[mlflow] Server erreichbar: {r.status_code}")
@@ -105,18 +98,20 @@ def run_tuning():
         "degrees": tune.uniform(0.0, 30.0),
         "scale":   tune.uniform(0.4, 0.6),
         "mosaic":  tune.uniform(0.0, 1.0),
-        "batch":   tune.choice([4, 8]),  # CPU smoke-test: [4, 8]
+        "batch":   tune.choice([4, 8]),        # CPU: [4, 8] — GPU: [16, 32, 64]
     }
 
-    # FIX: mlflow.start_run() damit ein Parent-Run in MLflow sichtbar ist
-    with mlflow.start_run(run_name="ray_tune_search"):
+    # FIX: Parent-Run ID als Env-Var setzen damit Ray-Worker-Runs als Child erscheinen
+    with mlflow.start_run(run_name="ray_tune_search") as parent_run:
         mlflow.log_params({
-            "model":           cfg["model"],
-            "epochs_per_trial": 1,    # 15
-            "iterations":       1,    # 20
-            "optimizer":       "AdamW",
-            "data_config":     str(data_path),
+            "model":            cfg["model"],
+            "epochs_per_trial": 1,             # 15 im echten Lauf
+            "iterations":       1,             # 20 im echten Lauf
+            "optimizer":        "AdamW",
+            "data_config":      str(data_path),
         })
+        # Ray-Worker erbt diese ID → Ultralytics-Runs werden als Child geloggt
+        os.environ["MLFLOW_PARENT_RUN_ID"] = parent_run.info.run_id
 
         results = model.tune(
             data=str(data_path),
@@ -126,7 +121,7 @@ def run_tuning():
             gpu_per_trial=0, # bei GPU → 1
             space=search_space,
             optimizer="AdamW",
-            workers=4,       # FIX: Komma ergänzt
+            workers=4,
         )
 
     search_keys = set(search_space.keys())
@@ -138,7 +133,10 @@ def run_tuning():
         print("[tune] WARNING: could not determine best params — config.yaml not updated.")
         return
 
-    # lr0 → learning_rate Alias für train.py
+    # FIX: 'data' und andere Nicht-Hyperparameter rausfiltern
+    for key in ("data", "batch"):
+        best_params.pop(key, None)
+
     if "lr0" in best_params:
         best_params["learning_rate"] = best_params["lr0"]
 
@@ -153,7 +151,6 @@ def run_tuning():
 
     print(f"[tune] config.yaml updated: {best_params}")
 
-    # Beste Parameter nochmal explizit in MLflow loggen
     with mlflow.start_run(run_name="best_params_summary", nested=False):
         mlflow.log_params(best_params)
         print("[tune] Beste Parameter in MLflow geloggt.")
