@@ -93,6 +93,7 @@ def train() -> None:
                 hsv_v=0.4,
                 patience=20,     # früh stoppen — wichtigster Anti-Overfitting-Parameter
                 optimizer="AdamW",
+                workers=8,       # 16 CPUs → 8 DataLoader-Threads
             )
 
             for key, value in getattr(results, "results_dict", {}).items():

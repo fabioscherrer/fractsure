@@ -156,7 +156,7 @@ def run_tuning():
             gpu_per_trial=0, # bei GPU → 1
             space=search_space,
             optimizer="AdamW",
-            workers=4,
+            workers=8,
             # Fix gegen Overfitting — nicht tunen, fix setzen
             fliplr=0.5,
             hsv_h=0.015,
