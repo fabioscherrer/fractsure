@@ -13,7 +13,12 @@ def load_config(config_path: Path) -> dict:
 
 
 def disable_ultralytics_mlflow() -> None:
-    """Avoid conflicts between Ultralytics automatic MLflow and our manual logging."""
+    """Avoid conflicts between Ultralytics automatic MLflow and our manual logging.
+
+    In train.py loggen wir bewusst manuell (ein einziger fokussierter Run).
+    In tune.py ist Ultralytics-Auto-MLflow dagegen aktiv, weil dort jeder Ray-Trial
+    automatisch als eigener Run geloggt werden soll.
+    """
     yolo_settings.update({"mlflow": False})
 
 
@@ -91,16 +96,16 @@ def train() -> None:
                 hsv_h=0.015,
                 hsv_s=0.7,
                 hsv_v=0.4,
-                patience=20,     # früh stoppen — wichtigster Anti-Overfitting-Parameter
+                patience=7,      # früh stoppen — wichtigster Anti-Overfitting-Parameter (vorher 20 = bei 20 Epochs nutzlos)
                 optimizer="AdamW",
-                workers=8,       # 16 CPUs → 8 DataLoader-Threads
+                workers=8,       # train.py läuft solo auf der VM (kein Ray) → volle 8 DataLoader-Threads ok
             )
 
             for key, value in getattr(results, "results_dict", {}).items():
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(key, float(value))
 
-            # NEU: best.pt in MLflow loggen damit export.py es findet
+            # best.pt unter "weights/" loggen — export.py erwartet genau diesen Pfad.
             weights_dir = Path(results.save_dir) / "weights"
             best_pt = weights_dir / "best.pt"
             if best_pt.exists():
@@ -108,6 +113,23 @@ def train() -> None:
                 print(f"[mlflow] best.pt geloggt: {best_pt}")
             else:
                 print("[mlflow] WARNUNG: best.pt nicht gefunden, wurde nicht geloggt.")
+
+            # YOLO erzeugt Plots/CSVs/Sample-Bilder in results.save_dir.
+            # Wir laden alle Nicht-.pt-Dateien rekursiv unter "yolo_outputs/" hoch,
+            # damit Loss-Kurven, Confusion Matrix, PR-/F1-Curve, Sample-Predictions
+            # und die Trainings-Augmentierungs-Beispiele zentral im MLflow-UI sichtbar sind.
+            # .pt-Files werden ausgeschlossen (best.pt liegt schon unter "weights/", last.pt nicht nötig).
+            yolo_run_dir = Path(results.save_dir)
+            if yolo_run_dir.exists():
+                logged_count = 0
+                for file_path in yolo_run_dir.rglob("*"):
+                    if not file_path.is_file() or file_path.suffix == ".pt":
+                        continue
+                    rel_dir = file_path.parent.relative_to(yolo_run_dir)
+                    artifact_subdir = "yolo_outputs" if rel_dir == Path(".") else f"yolo_outputs/{rel_dir.as_posix()}"
+                    mlflow.log_artifact(str(file_path), artifact_path=artifact_subdir)
+                    logged_count += 1
+                print(f"[mlflow] YOLO-Outputs hochgeladen: {logged_count} Dateien aus {yolo_run_dir}")
 
             mlflow.log_param("train_status", "completed")
             print("Training complete and metrics logged to MLflow.")

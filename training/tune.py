@@ -138,31 +138,41 @@ def run_tuning():
         "batch":        tune.choice([4, 8]),            # GPU: [16, 32, 64]
     }
 
-    with mlflow.start_run(run_name="ray_tune_search") as parent_run:
+    # Tuning-Parameter zentral definiert: werden sowohl an model.tune() als auch
+    # an mlflow.log_params übergeben → keine Diskrepanz zwischen geloggten und tatsächlichen Werten.
+    EPOCHS_PER_TRIAL = 1   # 15 im echten Lauf
+    ITERATIONS = 1         # 20 im echten Lauf
+
+    with mlflow.start_run(run_name="ray_tune_search"):
         mlflow.log_params({
             "model":            cfg["model"],
-            "epochs_per_trial": 1,    # 15 im echten Lauf
-            "iterations":       1,    # 20 im echten Lauf
+            "epochs_per_trial": EPOCHS_PER_TRIAL,
+            "iterations":       ITERATIONS,
             "optimizer":        "AdamW",
             "data_config":      str(data_path),
         })
-        os.environ["MLFLOW_PARENT_RUN_ID"] = parent_run.info.run_id
+        # Hinweis: Ultralytics-Auto-MLflow (ULTRALYTICS_MLFLOW=True oben) bleibt
+        # in tune.py bewusst aktiv, damit jeder Ray-Trial automatisch geloggt wird.
+        # In train.py ist es deaktiviert, weil dort manuell geloggt wird.
 
         results = model.tune(
             data=str(data_path),
-            epochs=1,        # 15
-            iterations=1,    # 20
+            epochs=EPOCHS_PER_TRIAL,
+            iterations=ITERATIONS,
             use_ray=True,
-            gpu_per_trial=0, # bei GPU → 1
+            gpu_per_trial=0,  # bei GPU → 1
             space=search_space,
             optimizer="AdamW",
-            workers=8,
+            # workers=4: Ultralytics allokiert intern 8 CPU pro Trial (NUM_THREADS).
+            # Auf e2-standard-16 (16 vCPU) laufen damit 2 Trials parallel.
+            # workers=4 lässt CPU-Budget für die eigentliche Training-Compute pro Trial.
+            workers=4,
             # Fix gegen Overfitting — nicht tunen, fix setzen
             fliplr=0.5,
             hsv_h=0.015,
             hsv_s=0.7,
             hsv_v=0.4,
-            patience=20,     # früh stoppen wenn keine Verbesserung
+            patience=7,      # früh stoppen, wenn keine Verbesserung (vorher 20 = bei 20 Epochs nutzlos)
         )
 
     search_keys = set(search_space.keys())
@@ -174,9 +184,10 @@ def run_tuning():
         print("[tune] WARNING: could not determine best params — config.yaml nicht aktualisiert.")
         return
 
-    # Nicht-Hyperparameter rausfiltern
-    for key in ("data", "batch"):
-        best_params.pop(key, None)
+    # 'data' ist Dataset-Pfad und kein Hyperparameter — rausfiltern.
+    # 'batch' bleibt drin, damit das durch Tuning gefundene Resultat tatsächlich
+    # in config.yaml landet (vorher wurde es hier rausgelöscht → Suche war wirkungslos).
+    best_params.pop("data", None)
 
     if "lr0" in best_params:
         best_params["learning_rate"] = best_params["lr0"]
