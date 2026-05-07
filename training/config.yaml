@@ -3,7 +3,7 @@ data_config: data/raw/hbfmid/data.yaml
 degrees: 8.707584864293766
 device: cpu
 dropout: 0.1331623403974767
-epochs: 20
+epochs: 100 # patience ist auf 7 sofern das modell nicht besser wird, wird das training abgebrochen
 experiment_name: fracture-yolo
 imgsz: 640
 learning_rate: 0.001111534355652253

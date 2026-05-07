@@ -113,7 +113,7 @@ def train() -> None:
                 hsv_h=0.015,
                 hsv_s=0.7,
                 hsv_v=0.4,
-                patience=7,      # früh stoppen — wichtigster Anti-Overfitting-Parameter (vorher 20 = bei 20 Epochs nutzlos)
+                patience=15,      # früh stoppen — wichtigster Anti-Overfitting-Parameter (vorher 20 = bei 20 Epochs nutzlos)
                 optimizer="AdamW",
                 workers=8,       # train.py läuft solo auf der VM (kein Ray) → volle 8 DataLoader-Threads ok
             )
