@@ -140,8 +140,8 @@ def run_tuning():
 
     # Tuning-Parameter zentral definiert: werden sowohl an model.tune() als auch
     # an mlflow.log_params übergeben → keine Diskrepanz zwischen geloggten und tatsächlichen Werten.
-    EPOCHS_PER_TRIAL = 1   # 15 im echten Lauf
-    ITERATIONS = 1         # 20 im echten Lauf
+    EPOCHS_PER_TRIAL = 15   # 15 im echten Lauf
+    ITERATIONS = 20         # 20 im echten Lauf
 
     with mlflow.start_run(run_name="ray_tune_search"):
         mlflow.log_params({
