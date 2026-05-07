@@ -76,6 +76,23 @@ def train() -> None:
         })
 
         model = YOLO(cfg["model"])
+        
+        # NEU: Callback für Epoch-für-Epoch Logging
+        def log_epoch_metrics(trainer):
+            if not trainer.metrics:
+                return
+            epoch = trainer.epoch
+            for key, value in trainer.metrics.items():
+                if isinstance(value, (int, float)):
+                    # FIX: Klammern ersetzen damit MLflow den Namen akzeptiert
+                    clean_key = key.replace("(", "_").replace(")", "")
+                    mlflow.log_metric(clean_key, float(value), step=epoch)
+            for key, value in trainer.label_loss_items(trainer.tloss, prefix="train").items():
+                if isinstance(value, (int, float)):
+                    clean_key = key.replace("(", "_").replace(")", "")
+                    mlflow.log_metric(clean_key, float(value), step=epoch)
+
+        model.add_callback("on_fit_epoch_end", log_epoch_metrics)
 
         try:
             results = model.train(
@@ -103,7 +120,8 @@ def train() -> None:
 
             for key, value in getattr(results, "results_dict", {}).items():
                 if isinstance(value, (int, float)):
-                    mlflow.log_metric(key, float(value))
+                    clean_key = key.replace("(", "_").replace(")", "")  # ← Fix hier auch
+                    mlflow.log_metric(clean_key, float(value))
 
             # best.pt unter "weights/" loggen — export.py erwartet genau diesen Pfad.
             weights_dir = Path(results.save_dir) / "weights"
