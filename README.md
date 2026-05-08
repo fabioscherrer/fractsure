@@ -111,7 +111,15 @@ uv run python training/train.py
 uv run python training/export.py
 ```
 
-Exported models are written to `api/model/`.
+Exported models are written to `api/model/`. The export keeps Ultralytics metadata in the ONNX file, including class names. The API reads those class names at startup and maps class ids back to labels in `/predict` responses.
+
+By default the export leaves NMS outside the ONNX graph (`nms=False`) so the API can apply configurable `CONF_THRESHOLD`, `IOU_THRESHOLD`, and `MAX_DETECTIONS` values without re-exporting the model. If you want Ultralytics to include NMS directly in the ONNX graph, set `ONNX_EXPORT_NMS=true` when exporting:
+
+```bash
+ONNX_EXPORT_NMS=true uv run python training/export.py
+```
+
+The API supports both output layouts, but the default external-NMS export is usually easier to tune for this project.
 
 ## Data and DVC
 
