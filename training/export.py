@@ -1,12 +1,13 @@
 """Export best MLflow-tracked YOLO model to ONNX for API inference."""
 
+import os
 from pathlib import Path
+import mlflow
 from mlflow.tracking import MlflowClient
 from ultralytics import YOLO
 
 
-def find_best_run(experiment_name: str, metric_name: str = "metrics/mAP50(B)") -> str:
-    # FIX: metric_name muss identisch mit dem Key in train.py sein
+def find_best_run(experiment_name: str, metric_name: str = "metrics/mAP50_B") -> str:
     client = MlflowClient()
     experiment = client.get_experiment_by_name(experiment_name)
     if experiment is None:
@@ -14,7 +15,7 @@ def find_best_run(experiment_name: str, metric_name: str = "metrics/mAP50(B)") -
 
     runs = client.search_runs(
         experiment_ids=[experiment.experiment_id],
-        filter_string="attributes.status = 'FINISHED'",  # nur abgeschlossene Runs
+        filter_string="attributes.status = 'FINISHED'",
         order_by=[f"metrics.`{metric_name}` DESC"],
         max_results=1,
     )
@@ -22,14 +23,14 @@ def find_best_run(experiment_name: str, metric_name: str = "metrics/mAP50(B)") -
         raise ValueError(f"No finished runs found in experiment: {experiment_name}")
 
     best_run = runs[0]
-    map50 = best_run.data.metrics.get(metric_name, 0.0)
-    print(f"[export] Bester Run: {best_run.info.run_id} — mAP50(B)={map50:.4f}")
+    map50 = best_run.data.metrics.get(metric_name, 0.0) #mAP50_B als Sortierkriterium für den besten Run ist die Standardwahl bei YOLO-Objekterkennung.
+    print(f"[export] Bester Run: {best_run.info.run_id} — mAP50_B={map50:.4f}")
     return best_run.info.run_id
 
 
 def find_latest_local_best(project_root: Path) -> Path | None:
     candidates = sorted(
-        project_root.glob("runs/detect/*/weights/best.pt"),
+        project_root.glob("runs/detect/train*/weights/best.pt"),  # nur train-Runs, nicht tune
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -40,6 +41,11 @@ def find_latest_local_best(project_root: Path) -> Path | None:
 
 def export_best_to_onnx(experiment_name: str = "fracture-yolo") -> Path:
     project_root = Path(__file__).resolve().parents[1]
+
+    # FIX: Tracking URI explizit setzen damit MLflow den Server findet
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    mlflow.set_tracking_uri(tracking_uri)
+
     client = MlflowClient()
     weights_path: Path | None = None
 
@@ -54,7 +60,7 @@ def export_best_to_onnx(experiment_name: str = "fracture-yolo") -> Path:
 
     if weights_path is None:
         raise ValueError(
-            "Kein best.pt gefunden — weder in MLflow noch in runs/detect/*/weights/."
+            "Kein best.pt gefunden — weder in MLflow noch in runs/detect/train*/weights/."
         )
 
     model = YOLO(str(weights_path))
