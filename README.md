@@ -91,7 +91,7 @@ Expected behavior:
 
 - `health` returns `{"status":"ok"}`.
 - `predict` returns JSON with `model_loaded` and `boxes`.
-- The API uses `CONF_THRESHOLD=0.01` by default for this exported model; tune with `CONF_THRESHOLD` env if detections are too sparse or too noisy.
+- The API uses `CONF_THRESHOLD=0.01` and `MAX_DETECTIONS=1` by default for this exported model; tune `CONF_THRESHOLD`, `IOU_THRESHOLD`, or `MAX_DETECTIONS` env values if detections are too sparse, too noisy, or you want to return more than one box.
 - If no ONNX model is present in `api/model/`, the API still returns a placeholder box (`model_loaded: false`).
 - If you export an ONNX file after containers were built, rebuild the API image so the container can see it (`docker compose up --build api`).
 

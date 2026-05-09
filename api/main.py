@@ -21,7 +21,7 @@ MODEL_PATH_ENV = os.getenv("MODEL_PATH")
 
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.01"))
 IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.45"))
-MAX_DETECTIONS = int(os.getenv("MAX_DETECTIONS", "50"))
+MAX_DETECTIONS = int(os.getenv("MAX_DETECTIONS", "1"))
 DEFAULT_INPUT_SIZE = (640, 640)
 
 
@@ -337,6 +337,7 @@ def decode_nms_output(
             boxes[valid], scores[valid], class_ids[valid], strict=False
         )
     ]
+    detections.sort(key=lambda detection: float(detection["score"]), reverse=True)
     return detections[:MAX_DETECTIONS]
 
 
