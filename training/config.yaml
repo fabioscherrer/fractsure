@@ -1,15 +1,15 @@
-experiment_name: fracture-yolo
-run_name: baseline-yolov8n
-model: yolov8n.pt
-
-# Point this to your YOLO dataset YAML file.
+batch: 8
 data_config: data/raw/hbfmid/data.yaml
-
-epochs: 30
+degrees: 8.707584864293766
+device: cpu
+dropout: 0.1331623403974767
+epochs: 100 # patience ist auf 7 sofern das modell nicht besser wird, wird das training abgebrochen
+experiment_name: fracture-yolo
 imgsz: 640
-batch: 16
-device: 0
-
-# These values are examples and can be tuned in tune.py
-learning_rate: 0.01
-weight_decay: 0.0005
+learning_rate: 0.001111534355652253
+lr0: 0.001111534355652253
+model: yolov8n.pt
+mosaic: 0.7167436879985997
+run_name: final_model_after_tuning
+scale: 0.40006084812811604
+weight_decay: 0.000581163482611298
