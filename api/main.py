@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +18,33 @@ app = FastAPI(title="Fracture Detection API", version="0.1.0")
 
 MODEL_DIR = Path(__file__).resolve().parent / "model"
 MODEL_PATH_ENV = os.getenv("MODEL_PATH")
-model_session: ort.InferenceSession | None = None
 
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.01"))
 IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.45"))
-MAX_DETECTIONS = int(os.getenv("MAX_DETECTIONS", "50"))
+MAX_DETECTIONS = int(os.getenv("MAX_DETECTIONS", "1"))
+DEFAULT_INPUT_SIZE = (640, 640)
+
+
+@dataclass(frozen=True)
+class LetterboxInfo:
+    """Information needed to map model-space boxes back to the original image."""
+
+    ratio: float
+    pad_x: float
+    pad_y: float
+
+
+@dataclass(frozen=True)
+class ModelContext:
+    """Loaded ONNX model plus the metadata needed for YOLO post-processing."""
+
+    session: ort.InferenceSession
+    input_name: str
+    input_size: tuple[int, int]
+    class_names: dict[int, str]
+
+
+model_context: ModelContext | None = None
 
 
 def resolve_model_path() -> Path | None:
@@ -41,9 +65,30 @@ def load_image(payload: bytes) -> Image.Image:
         raise HTTPException(status_code=400, detail="Invalid image uploaded.") from exc
 
 
+def parse_class_names(session: ort.InferenceSession) -> dict[int, str]:
+    """Read Ultralytics class labels from ONNX custom metadata."""
+
+    names_raw = session.get_modelmeta().custom_metadata_map.get("names")
+    if not names_raw:
+        return {}
+
+    try:
+        parsed = ast.literal_eval(names_raw)
+    except (SyntaxError, ValueError):
+        return {}
+
+    if isinstance(parsed, dict):
+        return {int(key): str(value) for key, value in parsed.items()}
+
+    if isinstance(parsed, list):
+        return {index: str(value) for index, value in enumerate(parsed)}
+
+    return {}
+
+
 def resolve_input_size(session: ort.InferenceSession) -> tuple[int, int]:
     shape = session.get_inputs()[0].shape
-    default_w, default_h = 640, 640
+    default_w, default_h = DEFAULT_INPUT_SIZE
 
     if len(shape) < 4:
         return default_w, default_h
@@ -53,33 +98,77 @@ def resolve_input_size(session: ort.InferenceSession) -> tuple[int, int]:
     return int(w), int(h)
 
 
-def preprocess_image(image: Image.Image, input_size: tuple[int, int]) -> np.ndarray:
-    resample = getattr(Image, "Resampling", Image).BILINEAR
-    resized = image.resize(input_size, resample)
-    array = np.asarray(resized, dtype=np.float32) / 255.0
+def letterbox_image(
+    image: Image.Image, input_size: tuple[int, int]
+) -> tuple[Image.Image, LetterboxInfo]:
+    """Resize without distortion using the same letterbox strategy YOLO expects."""
+
+    input_w, input_h = input_size
+    original_w, original_h = image.size
+    ratio = min(input_w / original_w, input_h / original_h)
+    resized_w = int(round(original_w * ratio))
+    resized_h = int(round(original_h * ratio))
+
+    resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else 2
+    resized = image.resize((resized_w, resized_h), resample)
+
+    canvas = Image.new("RGB", (input_w, input_h), (114, 114, 114))
+    pad_x = (input_w - resized_w) / 2
+    pad_y = (input_h - resized_h) / 2
+    canvas.paste(resized, (int(round(pad_x - 0.1)), int(round(pad_y - 0.1))))
+
+    return canvas, LetterboxInfo(ratio=ratio, pad_x=pad_x, pad_y=pad_y)
+
+
+def preprocess_image(
+    image: Image.Image, input_size: tuple[int, int]
+) -> tuple[np.ndarray, LetterboxInfo]:
+    letterboxed, letterbox = letterbox_image(image, input_size)
+    array = np.asarray(letterboxed, dtype=np.float32) / 255.0
     array = np.transpose(array, (2, 0, 1))
-    return np.expand_dims(array, axis=0)
+    return np.expand_dims(array, axis=0), letterbox
 
 
-def clip_box(x1: float, y1: float, x2: float, y2: float, width: int, height: int) -> tuple[int, int, int, int] | None:
-    x1c = int(np.clip(round(x1), 0, width - 1))
-    y1c = int(np.clip(round(y1), 0, height - 1))
-    x2c = int(np.clip(round(x2), 0, width - 1))
-    y2c = int(np.clip(round(y2), 0, height - 1))
-
-    if x2c <= x1c or y2c <= y1c:
-        return None
-    return x1c, y1c, x2c, y2c
+def clip_boxes(boxes: np.ndarray, original_size: tuple[int, int]) -> np.ndarray:
+    original_w, original_h = original_size
+    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, original_w - 1)
+    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, original_h - 1)
+    return boxes
 
 
-def make_detection(x1: int, y1: int, x2: int, y2: int, class_id: int, confidence: float) -> dict[str, Any]:
+def scale_boxes_to_original(
+    boxes: np.ndarray,
+    letterbox: LetterboxInfo,
+    original_size: tuple[int, int],
+) -> np.ndarray:
+    """Map xyxy boxes from model input pixels back to original image pixels."""
+
+    boxes = boxes.astype(np.float32, copy=True)
+    boxes[:, [0, 2]] = (boxes[:, [0, 2]] - letterbox.pad_x) / letterbox.ratio
+    boxes[:, [1, 3]] = (boxes[:, [1, 3]] - letterbox.pad_y) / letterbox.ratio
+    return clip_boxes(boxes, original_size)
+
+
+def xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
+    converted = boxes.astype(np.float32, copy=True)
+    converted[:, 0] = boxes[:, 0] - boxes[:, 2] / 2
+    converted[:, 1] = boxes[:, 1] - boxes[:, 3] / 2
+    converted[:, 2] = boxes[:, 0] + boxes[:, 2] / 2
+    converted[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
+    return converted
+
+
+def make_detection(
+    box: np.ndarray, class_id: int, confidence: float, class_names: dict[int, str]
+) -> dict[str, Any]:
+    x1, y1, x2, y2 = np.rint(box).astype(int).tolist()
     return {
         "x1": x1,
         "y1": y1,
         "x2": x2,
         "y2": y2,
-        "label": f"class_{class_id}",
-        "score": round(confidence, 4),
+        "label": class_names.get(class_id, f"class_{class_id}"),
+        "score": round(float(confidence), 4),
     }
 
 
@@ -97,14 +186,16 @@ def iou(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
     boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
     union = box_area + boxes_area - intersection
 
-    return np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
+    return np.divide(
+        intersection, union, out=np.zeros_like(intersection), where=union > 0
+    )
 
 
-def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float, max_detections: int) -> list[int]:
+def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float) -> list[int]:
     order = np.argsort(scores)[::-1]
     keep: list[int] = []
 
-    while order.size > 0 and len(keep) < max_detections:
+    while order.size > 0:
         current = int(order[0])
         keep.append(current)
         if order.size == 1:
@@ -117,7 +208,26 @@ def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float, max_detections:
     return keep
 
 
+def class_aware_nms(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    threshold: float,
+    max_detections: int,
+) -> list[int]:
+    keep: list[int] = []
+    for class_id in np.unique(class_ids):
+        class_indices = np.flatnonzero(class_ids == class_id)
+        class_keep = nms(boxes[class_indices], scores[class_indices], threshold)
+        keep.extend(class_indices[index] for index in class_keep)
+
+    keep.sort(key=lambda index: float(scores[index]), reverse=True)
+    return keep[:max_detections]
+
+
 def normalize_output(raw_outputs: list[np.ndarray]) -> np.ndarray | None:
+    """Return model predictions as rows, supporting common Ultralytics ONNX layouts."""
+
     for output in raw_outputs:
         arr = np.asarray(output)
         if arr.ndim == 3 and arr.shape[0] == 1:
@@ -128,11 +238,8 @@ def normalize_output(raw_outputs: list[np.ndarray]) -> np.ndarray | None:
         if arr.ndim != 2 or arr.size == 0:
             continue
 
-        # Handle common YOLO export layout: (84, N) -> (N, 84)
-        if arr.shape[0] <= 128 and arr.shape[1] > 128:
-            arr = arr.T
-
-        if arr.shape[1] < 5 and arr.shape[0] >= 5:
+        # Ultralytics detect export without built-in NMS is usually (4 + classes, anchors).
+        if arr.shape[0] <= 256 and arr.shape[1] > arr.shape[0]:
             arr = arr.T
 
         if arr.shape[1] >= 5:
@@ -141,108 +248,113 @@ def normalize_output(raw_outputs: list[np.ndarray]) -> np.ndarray | None:
     return None
 
 
-def decode_xywh(rows: np.ndarray, input_size: tuple[int, int], original_size: tuple[int, int]) -> list[dict[str, Any]]:
-    input_w, input_h = input_size
-    original_w, original_h = original_size
-    sx = original_w / input_w
-    sy = original_h / input_h
+def split_scores(rows: np.ndarray, class_count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Extract class ids and confidences from YOLO rows.
 
-    detections_with_obj: list[dict[str, Any]] = []
-    detections_without_obj: list[dict[str, Any]] = []
-    for row in rows:
-        if row.shape[0] < 5:
-            continue
+    Current Ultralytics YOLO detect exports output ``xywh + class scores``. Older YOLO
+    variants can output ``xywh + objectness + class scores``; this supports both when
+    the class count can be inferred from ONNX metadata.
+    """
 
-        cx, cy, w, h = map(float, row[:4])
-        tail = row[4:]
-        if tail.size == 0:
-            continue
+    score_columns = rows[:, 4:]
 
-        x1 = (cx - w / 2.0) * sx
-        y1 = (cy - h / 2.0) * sy
-        x2 = (cx + w / 2.0) * sx
-        y2 = (cy + h / 2.0) * sy
-        clipped = clip_box(x1, y1, x2, y2, original_w, original_h)
-        if clipped is None:
-            continue
+    if class_count > 0 and score_columns.shape[1] == class_count + 1:
+        objectness = score_columns[:, 0]
+        class_scores = score_columns[:, 1:]
+        class_ids = np.argmax(class_scores, axis=1)
+        scores = objectness * class_scores[np.arange(class_scores.shape[0]), class_ids]
+        return class_ids.astype(np.int64), scores.astype(np.float32)
 
-        x1c, y1c, x2c, y2c = clipped
-        class_id = int(np.argmax(tail))
-        confidence = float(tail[class_id])
-        if confidence >= CONF_THRESHOLD:
-            detections_without_obj.append(make_detection(x1c, y1c, x2c, y2c, class_id, confidence))
-
-        if tail.size >= 2:
-            objectness = float(tail[0])
-            class_scores = tail[1:]
-            class_id_obj = int(np.argmax(class_scores))
-            confidence_obj = objectness * float(class_scores[class_id_obj])
-            if confidence_obj >= CONF_THRESHOLD:
-                detections_with_obj.append(
-                    make_detection(x1c, y1c, x2c, y2c, class_id_obj, confidence_obj)
-                )
-
-    # Different exports include objectness differently. Use the richer result set.
-    return detections_with_obj if len(detections_with_obj) >= len(detections_without_obj) else detections_without_obj
+    class_scores = score_columns
+    class_ids = np.argmax(class_scores, axis=1)
+    scores = class_scores[np.arange(class_scores.shape[0]), class_ids]
+    return class_ids.astype(np.int64), scores.astype(np.float32)
 
 
-def decode_xyxy(rows: np.ndarray, input_size: tuple[int, int], original_size: tuple[int, int]) -> list[dict[str, Any]]:
-    input_w, input_h = input_size
-    original_w, original_h = original_size
+def decode_raw_yolo_output(
+    rows: np.ndarray,
+    letterbox: LetterboxInfo,
+    original_size: tuple[int, int],
+    class_names: dict[int, str],
+) -> list[dict[str, Any]]:
+    class_ids, scores = split_scores(rows, class_count=len(class_names))
+    candidates = scores >= CONF_THRESHOLD
+    if not np.any(candidates):
+        return []
 
-    detections: list[dict[str, Any]] = []
-    for row in rows:
-        if row.shape[0] < 6:
-            continue
+    boxes = xywh_to_xyxy(rows[candidates, :4])
+    boxes = scale_boxes_to_original(boxes, letterbox, original_size)
+    scores = scores[candidates]
+    class_ids = class_ids[candidates]
 
-        x1, y1, x2, y2, confidence, class_id = map(float, row[:6])
-        if confidence < CONF_THRESHOLD:
-            continue
+    valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    if not np.any(valid):
+        return []
 
-        # Some exports return normalized coordinates, others return model-space coordinates.
-        if max(x1, y1, x2, y2) <= 1.5:
-            x1 *= original_w
-            x2 *= original_w
-            y1 *= original_h
-            y2 *= original_h
-        else:
-            x1 *= original_w / input_w
-            x2 *= original_w / input_w
-            y1 *= original_h / input_h
-            y2 *= original_h / input_h
+    boxes = boxes[valid]
+    scores = scores[valid]
+    class_ids = class_ids[valid]
 
-        clipped = clip_box(x1, y1, x2, y2, original_w, original_h)
-        if clipped is None:
-            continue
+    keep = class_aware_nms(
+        boxes, scores, class_ids, threshold=IOU_THRESHOLD, max_detections=MAX_DETECTIONS
+    )
+    return [
+        make_detection(
+            boxes[index], int(class_ids[index]), float(scores[index]), class_names
+        )
+        for index in keep
+    ]
 
-        x1c, y1c, x2c, y2c = clipped
-        class_index = int(round(class_id))
-        detections.append(make_detection(x1c, y1c, x2c, y2c, class_index, confidence))
 
-    return detections
+def decode_nms_output(
+    rows: np.ndarray,
+    letterbox: LetterboxInfo,
+    original_size: tuple[int, int],
+    class_names: dict[int, str],
+) -> list[dict[str, Any]]:
+    """Decode an Ultralytics ONNX export that already includes NMS in the graph."""
+
+    rows = rows[rows[:, 4] >= CONF_THRESHOLD]
+    if rows.size == 0:
+        return []
+
+    boxes = rows[:, :4]
+    if float(np.max(boxes)) <= 1.5:
+        original_w, original_h = original_size
+        boxes = boxes * np.array(
+            [original_w, original_h, original_w, original_h], dtype=np.float32
+        )
+    else:
+        boxes = scale_boxes_to_original(boxes, letterbox, original_size)
+
+    scores = rows[:, 4]
+    class_ids = np.rint(rows[:, 5]).astype(np.int64)
+    valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+
+    detections = [
+        make_detection(box, int(class_id), float(score), class_names)
+        for box, score, class_id in zip(
+            boxes[valid], scores[valid], class_ids[valid], strict=False
+        )
+    ]
+    detections.sort(key=lambda detection: float(detection["score"]), reverse=True)
+    return detections[:MAX_DETECTIONS]
 
 
 def decode_detections(
     raw_outputs: list[np.ndarray],
-    input_size: tuple[int, int],
+    letterbox: LetterboxInfo,
     original_size: tuple[int, int],
+    class_names: dict[int, str],
 ) -> list[dict[str, Any]]:
     rows = normalize_output(raw_outputs)
     if rows is None:
         return []
 
     if rows.shape[1] == 6:
-        detections = decode_xyxy(rows, input_size, original_size)
-    else:
-        detections = decode_xywh(rows, input_size, original_size)
+        return decode_nms_output(rows, letterbox, original_size, class_names)
 
-    if not detections:
-        return []
-
-    boxes = np.array([[d["x1"], d["y1"], d["x2"], d["y2"]] for d in detections], dtype=np.float32)
-    scores = np.array([float(d["score"]) for d in detections], dtype=np.float32)
-    keep = nms(boxes, scores, threshold=IOU_THRESHOLD, max_detections=MAX_DETECTIONS)
-    return [detections[i] for i in keep]
+    return decode_raw_yolo_output(rows, letterbox, original_size, class_names)
 
 
 def placeholder_box(width: int, height: int) -> dict[str, Any]:
@@ -258,7 +370,7 @@ def placeholder_box(width: int, height: int) -> dict[str, Any]:
 
 @app.on_event("startup")
 def load_model() -> None:
-    global model_session
+    global model_context
 
     model_path = resolve_model_path()
     if model_path is None:
@@ -266,10 +378,21 @@ def load_model() -> None:
         return
 
     try:
-        model_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession(
+            str(model_path), providers=["CPUExecutionProvider"]
+        )
+        model_context = ModelContext(
+            session=session,
+            input_name=session.get_inputs()[0].name,
+            input_size=resolve_input_size(session),
+            class_names=parse_class_names(session),
+        )
         print(f"Loaded ONNX model: {model_path}")
+        print(
+            f"Input size: {model_context.input_size}; classes: {model_context.class_names or 'unknown'}"
+        )
     except Exception as exc:
-        model_session = None
+        model_context = None
         print(f"Failed to load ONNX model at {model_path}: {exc}")
 
 
@@ -287,20 +410,28 @@ async def predict(file: UploadFile = File(...)) -> dict[str, Any]:
     image = load_image(payload)
     width, height = image.size
 
-    if model_session is None:
+    if model_context is None:
         return {
             "model_loaded": False,
             "boxes": [placeholder_box(width, height)],
         }
 
     try:
-        input_name = model_session.get_inputs()[0].name
-        input_size = resolve_input_size(model_session)
-        input_tensor = preprocess_image(image, input_size)
-        raw_outputs = model_session.run(None, {input_name: input_tensor})
-        boxes = decode_detections(raw_outputs, input_size=input_size, original_size=(width, height))
+        input_tensor, letterbox = preprocess_image(image, model_context.input_size)
+        outputs = model_context.session.run(
+            None, {model_context.input_name: input_tensor}
+        )
+        raw_outputs = [np.asarray(output) for output in outputs]
+        boxes = decode_detections(
+            raw_outputs,
+            letterbox=letterbox,
+            original_size=(width, height),
+            class_names=model_context.class_names,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Model inference failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Model inference failed: {exc}"
+        ) from exc
 
     return {
         "model_loaded": True,
