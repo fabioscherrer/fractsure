@@ -42,7 +42,12 @@ if uploaded_file is not None:
                 output = image.copy()
                 draw = ImageDraw.Draw(output)
 
-                boxes = result.get("boxes", [])
+                boxes = sorted(
+                    result.get("boxes", []),
+                    key=lambda box: float(box.get("score", 0.0)),
+                    reverse=True,
+                )[:1]
+                result["boxes"] = boxes
                 for box in boxes:
                     x1 = int(box.get("x1", 0))
                     y1 = int(box.get("y1", 0))

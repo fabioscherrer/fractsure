@@ -3,8 +3,10 @@
 import os
 from pathlib import Path
 import mlflow
+
+import yaml
 from mlflow.tracking import MlflowClient
-from ultralytics import YOLO
+from ultralytics.models import YOLO
 
 
 def find_best_run(experiment_name: str, metric_name: str = "metrics/mAP50_B") -> str:
@@ -39,6 +41,22 @@ def find_latest_local_best(project_root: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def read_training_imgsz(project_root: Path, default: int = 640) -> int:
+    config_path = project_root / "training" / "config.yaml"
+    if not config_path.exists():
+        return default
+
+    config = yaml.safe_load(config_path.read_text()) or {}
+    return int(config.get("imgsz", default))
+
+
 def export_best_to_onnx(experiment_name: str = "fracture-yolo") -> Path:
     project_root = Path(__file__).resolve().parents[1]
 
@@ -64,7 +82,14 @@ def export_best_to_onnx(experiment_name: str = "fracture-yolo") -> Path:
         )
 
     model = YOLO(str(weights_path))
-    exported = Path(model.export(format="onnx"))
+    exported = Path(
+        model.export(
+            format="onnx",
+            imgsz=read_training_imgsz(project_root),
+            simplify=True,
+            nms=env_flag("ONNX_EXPORT_NMS", default=False),
+        )
+    )
 
     target_dir = project_root / "api" / "model"
     target_dir.mkdir(parents=True, exist_ok=True)

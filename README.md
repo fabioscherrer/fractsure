@@ -78,14 +78,20 @@ curl http://localhost:8000/health
 ```
 
 ```bash
+# bash/zsh
 TEST_IMAGE="$(find data/raw/hbfmid/test/images -type f | head -n 1)"
 curl -X POST http://localhost:8000/predict -F "file=@${TEST_IMAGE}"
+
+# fish
+set TEST_IMAGE (find data/raw/hbfmid/test/images -type f | head -n 1)
+curl -X POST http://localhost:8000/predict -F "file=@$TEST_IMAGE"
 ```
 
 Expected behavior:
 
 - `health` returns `{"status":"ok"}`.
 - `predict` returns JSON with `model_loaded` and `boxes`.
+- The API uses `CONF_THRESHOLD=0.01` and `MAX_DETECTIONS=1` by default for this exported model; tune `CONF_THRESHOLD`, `IOU_THRESHOLD`, or `MAX_DETECTIONS` env values if detections are too sparse, too noisy, or you want to return more than one box.
 - If no ONNX model is present in `api/model/`, the API still returns a placeholder box (`model_loaded: false`).
 - If you export an ONNX file after containers were built, rebuild the API image so the container can see it (`docker compose up --build api`).
 
@@ -105,7 +111,15 @@ uv run python training/train.py
 uv run python training/export.py
 ```
 
-Exported models are written to `api/model/`.
+Exported models are written to `api/model/`. The export keeps Ultralytics metadata in the ONNX file, including class names. The API reads those class names at startup and maps class ids back to labels in `/predict` responses.
+
+By default the export leaves NMS outside the ONNX graph (`nms=False`) so the API can apply configurable `CONF_THRESHOLD`, `IOU_THRESHOLD`, and `MAX_DETECTIONS` values without re-exporting the model. If you want Ultralytics to include NMS directly in the ONNX graph, set `ONNX_EXPORT_NMS=true` when exporting:
+
+```bash
+ONNX_EXPORT_NMS=true uv run python training/export.py
+```
+
+The API supports both output layouts, but the default external-NMS export is usually easier to tune for this project.
 
 ## Data and DVC
 

@@ -1,0 +1,36 @@
+name: docker-smoke
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  api-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t fractsure-api ./api
+
+      - name: Run API container
+        run: docker run -d --rm --name fractsure-api -p 8000:8000 fractsure-api
+
+      - name: Wait for health endpoint
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl --fail http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy in time"
+          docker logs fractsure-api
+          exit 1
+
+      - name: Stop API container
+        if: always()
+        run: docker stop fractsure-api
