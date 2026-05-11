@@ -11,7 +11,7 @@ Clean scaffold for an end-to-end fracture detection pipeline with clear separati
 - Package management: `uv`
 - ML: YOLO (Ultralytics), MLflow, ONNX Runtime
 - Serving: FastAPI
-- Frontend: Streamlit
+- Frontend: React + Vite
 - Data versioning: DVC
 - Containerization: Docker + Docker Compose
 - CI: GitHub Actions
@@ -31,7 +31,8 @@ Clean scaffold for an end-to-end fracture detection pipeline with clear separati
 │   ├── main.py
 │   └── model/
 ├── frontend/
-│   ├── app.py
+│   ├── src/
+│   ├── package.json
 │   └── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -55,7 +56,9 @@ uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 3. In another terminal, run the frontend:
 
 ```bash
-API_URL=http://localhost:8000 uv run streamlit run frontend/app.py
+cd frontend
+npm install
+npm run dev
 ```
 
 ## Docker Compose
@@ -69,7 +72,7 @@ docker compose up --build
 - API: `http://localhost:8000`
 - Frontend: `http://localhost:8501`
 
-The frontend uses `API_URL=http://api:8000` inside the Docker network.
+The frontend proxies `/api/*` to the FastAPI service in local development and Docker.
 
 Quick API smoke test from the host after `docker compose up --build`:
 
