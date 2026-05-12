@@ -39,3 +39,4 @@ runs/
 # OS/editor noise
 .DS_Store
 .vscode/
+.claude/
